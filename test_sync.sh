@@ -14,10 +14,10 @@ curl -X POST "$API_URL" \
     "source": {
       "type": "ssh",
       "details": {
-        "host": "xdev03",
+        "host": "sshServer",
         "port": 22,
         "username": "pdm",
-        "path": "/opt/sahibinden/data/poi",
+        "path": "/opt/data",
         "privateKey": "LS0tLS1CRUdJTiBPUEVOU1NIIFBSSVZBVEUgS0VZLS0tLS0K...replace-with-your-actual-base64-key..."
       }
     },

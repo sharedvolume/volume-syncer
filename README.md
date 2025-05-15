@@ -31,10 +31,10 @@ Request payload:
   "source": {
     "type": "ssh",
     "details": {
-      "host": "xdev03",
+      "host": "sshServer",
       "port": 22,
       "username": "pdm",
-      "path": "/opt/sahibinden/data/poi",
+      "path": "/opt/data",
       "privateKey": "<base64 encoded private key>"
     }
   },
