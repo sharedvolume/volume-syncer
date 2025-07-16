@@ -39,7 +39,7 @@ Request payload:
     }
   },
   "target": {
-    "path": "/Users/bilgehan.nal/Desktop/test/cp"
+    "path": "/Users/bilgehan.nal/Desktop/test/cp/repo"
   },
   "timeout": "30s"
 }
