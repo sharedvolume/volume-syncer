@@ -13,11 +13,11 @@ help:
 
 # Build the Go binary
 build:
-	go build -o volume-syncer .
+	go build -o volume-syncer ./cmd/server
 
 # Run the application locally
 run:
-	go run main.go
+	go run ./cmd/server
 
 # Run tests
 test:

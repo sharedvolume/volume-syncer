@@ -6,7 +6,10 @@ A high-performance API server for synchronizing data from various sources (SSH, 
 
 - **REST API**: Simple HTTP API for triggering sync operations
 - **SSH Support**: Sync from remote servers using SSH with private key authentication
-- **Extensible Design**: Easy to add support for Git, S3, and other sources
+- **Git Support**: Clone and sync from Git repositories
+- **HTTP Support**: Download files from HTTP/HTTPS URLs
+- **S3 Support**: Sync data from AWS S3 or S3-compatible storage
+- **Extensible Design**: Easy to add support for additional sources
 - **Concurrent Safety**: Prevents multiple sync operations from running simultaneously
 - **Health Checks**: Built-in health endpoint for monitoring
 - **Dockerized**: Ready-to-deploy container with all dependencies
@@ -100,18 +103,43 @@ go run main.go
 
 Currently supported:
 - **SSH**: Sync from remote servers via SSH
-
-Planned:
-- **Git**: Clone/pull from Git repositories
-- **S3**: Sync from AWS S3 buckets
+- **Git**: Clone/pull from Git repositories  
 - **HTTP**: Download from HTTP/HTTPS endpoints
+- **S3**: Sync from AWS S3 or S3-compatible storage
 
 ### SSH Configuration
 
 - `host`: SSH server hostname or IP (required)
 - `port`: SSH port (default: 22)
 - `username`: SSH username (default: "root")
-- `privateKey`: Base64 encoded private key (required)
+- `privateKey`: Base64-encoded SSH private key (optional)
+- `password`: SSH password (optional)
+
+**Note**: `privateKey` and `password` cannot be provided at the same time.
+
+### Git Configuration
+
+- `url`: Git repository URL (required)
+- `branch`: Branch to clone (optional, if not specified, uses repository's default branch)
+- `depth`: Clone depth (optional, default: 1 for shallow clone)
+- `username`: Username for HTTP authentication (optional, requires password)
+- `password`: Password for HTTP authentication (optional, requires username)
+- `privateKey`: Base64-encoded SSH private key for SSH authentication (optional)
+
+**Note**: `username`/`password` and `privateKey` cannot be provided at the same time.
+
+### HTTP Configuration
+
+- `url`: HTTP/HTTPS URL to download (required)
+
+### S3 Configuration
+
+- `endpointUrl`: S3 endpoint URL (required, e.g., "https://s3.amazonaws.com")
+- `bucketName`: S3 bucket name (required)
+- `path`: Path/prefix in the bucket (required)
+- `accessKey`: AWS access key (required)
+- `secretKey`: AWS secret key (required)
+- `region`: AWS region (required)
 
 ### Environment Variables
 
@@ -123,6 +151,7 @@ Planned:
 ### Sync from SSH Server
 
 ```bash
+# Using private key (base64 encoded)
 curl -X POST http://localhost:8080/api/1.0/sync \
   -H "Content-Type: application/json" \
   -d '{
@@ -137,8 +166,123 @@ curl -X POST http://localhost:8080/api/1.0/sync \
     },
     "target": {
       "path": "/mnt/shared-volume"
+    }
+  }'
+
+# Using password authentication
+curl -X POST http://localhost:8080/api/1.0/sync \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": {
+      "type": "ssh",
+      "details": {
+        "host": "example.com",
+        "port": 22,
+        "username": "deploy",
+        "password": "your-password"
+      }
     },
-    "timeout": "60s"
+    "target": {
+      "path": "/mnt/shared-volume"
+    }
+  }'
+```
+
+### Sync from Git Repository
+
+```bash
+# Clone with username/password authentication
+curl -X POST http://localhost:8080/api/1.0/sync \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": {
+      "type": "git",
+      "details": {
+        "url": "https://github.com/user/repo.git",
+        "branch": "main",
+        "depth": 1,
+        "username": "your-username",
+        "password": "your-password"
+      }
+    },
+    "target": {
+      "path": "/mnt/shared-volume"
+    }
+  }'
+
+# Clone with SSH private key authentication
+curl -X POST http://localhost:8080/api/1.0/sync \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": {
+      "type": "git",
+      "details": {
+        "url": "git@github.com:user/repo.git",
+        "branch": "main",
+        "depth": 1,
+        "privateKey": "LS0tLS1CRUdJTi..."
+      }
+    },
+    "target": {
+      "path": "/mnt/shared-volume"
+    }
+  }'
+
+# Clone using repository default branch (no branch specified)
+curl -X POST http://localhost:8080/api/1.0/sync \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": {
+      "type": "git",
+      "details": {
+        "url": "https://github.com/user/repo.git",
+        "depth": 1
+      }
+    },
+    "target": {
+      "path": "/mnt/shared-volume"
+    }
+  }'
+```
+
+### Download from HTTP URL
+
+```bash
+curl -X POST http://localhost:8080/api/1.0/sync \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": {
+      "type": "http",
+      "details": {
+        "url": "https://example.com/file.zip"
+      }
+    },
+    "target": {
+      "path": "/mnt/shared-volume"
+    }
+  }'
+```
+
+### Sync from S3 Bucket
+
+```bash
+curl -X POST http://localhost:8080/api/1.0/sync \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": {
+      "type": "s3",
+      "details": {
+        "endpointUrl": "https://s3.amazonaws.com",
+        "bucketName": "my-aws-bucket",
+        "path": "project/data/",
+        "accessKey": "AKIA....",
+        "secretKey": "abcd1234...",
+        "region": "us-east-1"
+      }
+    },
+    "target": {
+      "path": "/mnt/shared-volume"
+    }
   }'
 ```
 
@@ -170,20 +314,46 @@ The server provides a health check endpoint at `/health` that returns:
 
 ### Project Structure
 ```
-├── main.go                 # Server entry point
-├── internal/syncer/        # Sync logic
-│   ├── manager.go         # Request handling and validation
-│   └── ssh.go             # SSH synchronization implementation
-├── Dockerfile             # Container definition
-├── docker-compose.yml     # Docker Compose configuration
-└── README.md              # This file
+├── cmd/
+│   └── server/
+│       └── main.go           # Application entry point
+├── internal/
+│   ├── config/
+│   │   └── config.go         # Configuration management
+│   ├── handler/
+│   │   └── sync_handler.go   # HTTP request handlers
+│   ├── models/
+│   │   └── requests.go       # Request/response models
+│   ├── server/
+│   │   └── server.go         # HTTP server setup
+│   ├── service/
+│   │   └── sync_service.go   # Business logic
+│   ├── syncer/
+│   │   ├── git/
+│   │   │   └── git_syncer.go # Git synchronization
+│   │   ├── http/
+│   │   │   └── http_syncer.go # HTTP download
+│   │   ├── s3/
+│   │   │   └── s3_syncer.go  # S3 synchronization
+│   │   ├── ssh/
+│   │   │   └── ssh_syncer.go # SSH synchronization
+│   │   └── types.go          # Common types and factory
+│   └── utils/
+│       └── fs.go             # File system utilities
+├── pkg/
+│   └── errors/
+│       └── errors.go         # Custom error types
+├── Dockerfile                # Container definition
+├── docker-compose.yml        # Docker Compose configuration
+└── README.md                 # This file
 ```
 
 ### Adding New Source Types
 
-1. Create a new syncer implementation in `internal/syncer/`
-2. Add the new type to the validation logic in `manager.go`
-3. Update the `StartSync` method to handle the new type
+1. Create a new syncer implementation in `internal/syncer/<type>/`
+2. Add the new type to the models in `internal/models/requests.go`
+3. Add parsing logic in `internal/syncer/types.go`
+4. Update the service validation in `internal/service/sync_service.go`
 
 ## Troubleshooting
 
