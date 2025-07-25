@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -22,6 +23,14 @@ type HTTPSyncer struct {
 	timeout    time.Duration
 }
 
+// maskHTTPCredentials masks passwords and sensitive information in URLs
+func maskHTTPCredentials(urlStr string) string {
+	// Regex to match URLs with credentials: protocol://user:password@host/path
+	credentialURLRegex := regexp.MustCompile(`(https?://)([^:]+):([^@]+)(@[^/\s]+)`)
+	masked := credentialURLRegex.ReplaceAllString(urlStr, "${1}${2}:***${4}")
+	return masked
+}
+
 // NewHTTPSyncer creates a new HTTP syncer
 func NewHTTPSyncer(details *models.HTTPDownloadDetails, targetPath string, timeout time.Duration) *HTTPSyncer {
 	return &HTTPSyncer{
@@ -33,7 +42,7 @@ func NewHTTPSyncer(details *models.HTTPDownloadDetails, targetPath string, timeo
 
 // Sync downloads the file from the URL to the target path
 func (h *HTTPSyncer) Sync() error {
-	log.Printf("[HTTP SYNC] Starting HTTP download from %s to %s", h.details.URL, h.targetPath)
+	log.Printf("[HTTP SYNC] Starting HTTP download from %s to %s", maskHTTPCredentials(h.details.URL), h.targetPath)
 	log.Printf("[HTTP SYNC] Timeout configured: %v", h.timeout)
 
 	// Ensure the target directory exists

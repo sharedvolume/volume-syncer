@@ -1,6 +1,7 @@
 package s3
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -69,6 +70,10 @@ func (s *S3Syncer) Sync() error {
 	log.Printf("[S3 SYNC] Starting S3 sync from s3://%s/%s to %s", s.details.BucketName, s.details.Path, s.targetPath)
 	log.Printf("[S3 SYNC] Sync timeout: %v", s.timeout)
 
+	// Create context with timeout for all S3 operations
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+
 	// Ensure target directory exists
 	log.Printf("[S3 SYNC] Creating target directory: %s", s.targetPath)
 	if err := utils.EnsureDir(s.targetPath); err != nil {
@@ -79,8 +84,12 @@ func (s *S3Syncer) Sync() error {
 
 	// List objects in the bucket with the given prefix
 	log.Printf("[S3 SYNC] Listing objects in bucket with prefix: %s", s.details.Path)
-	objects, err := s.listObjects()
+	objects, err := s.listObjects(ctx)
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			log.Printf("[S3 SYNC] ERROR: S3 listing operation timed out after %v", s.timeout)
+			return fmt.Errorf("S3 listing operation timed out after %v", s.timeout)
+		}
 		log.Printf("[S3 SYNC] ERROR: Failed to list S3 objects: %v", err)
 		return fmt.Errorf("failed to list S3 objects: %w", err)
 	}
@@ -95,7 +104,11 @@ func (s *S3Syncer) Sync() error {
 	// Download each object
 	for i, obj := range objects {
 		log.Printf("[S3 SYNC] Processing object %d/%d: %s", i+1, len(objects), *obj.Key)
-		if err := s.downloadObject(obj); err != nil {
+		if err := s.downloadObject(ctx, obj); err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				log.Printf("[S3 SYNC] ERROR: S3 download operation timed out after %v", s.timeout)
+				return fmt.Errorf("S3 download operation timed out after %v", s.timeout)
+			}
 			log.Printf("[S3 SYNC] ERROR: Failed to download object %s: %v", *obj.Key, err)
 			return fmt.Errorf("failed to download object %s: %w", *obj.Key, err)
 		}
@@ -106,7 +119,7 @@ func (s *S3Syncer) Sync() error {
 }
 
 // listObjects lists all objects in the bucket with the given prefix
-func (s *S3Syncer) listObjects() ([]*s3.Object, error) {
+func (s *S3Syncer) listObjects(ctx context.Context) ([]*s3.Object, error) {
 	log.Printf("[S3 SYNC] Starting object listing operation")
 	var objects []*s3.Object
 
@@ -117,7 +130,7 @@ func (s *S3Syncer) listObjects() ([]*s3.Object, error) {
 
 	log.Printf("[S3 SYNC] Listing objects with prefix: %s", s.details.Path)
 	pageNum := 0
-	err := s.s3Client.ListObjectsV2Pages(input, func(page *s3.ListObjectsV2Output, lastPage bool) bool {
+	err := s.s3Client.ListObjectsV2PagesWithContext(ctx, input, func(page *s3.ListObjectsV2Output, lastPage bool) bool {
 		pageNum++
 		log.Printf("[S3 SYNC] Processing page %d (last page: %v)", pageNum, lastPage)
 
@@ -143,7 +156,7 @@ func (s *S3Syncer) listObjects() ([]*s3.Object, error) {
 }
 
 // downloadObject downloads a single object from S3
-func (s *S3Syncer) downloadObject(obj *s3.Object) error {
+func (s *S3Syncer) downloadObject(ctx context.Context, obj *s3.Object) error {
 	log.Printf("[S3 SYNC] Starting download of object: %s", *obj.Key)
 
 	// Calculate relative path by removing the prefix
@@ -173,10 +186,10 @@ func (s *S3Syncer) downloadObject(obj *s3.Object) error {
 	}
 	defer file.Close()
 
-	// Download the object
+	// Download the object with context
 	log.Printf("[S3 SYNC] Downloading s3://%s/%s -> %s", s.details.BucketName, *obj.Key, localPath)
 
-	bytesWritten, err := s.downloader.Download(file, &s3.GetObjectInput{
+	bytesWritten, err := s.downloader.DownloadWithContext(ctx, file, &s3.GetObjectInput{
 		Bucket: aws.String(s.details.BucketName),
 		Key:    obj.Key,
 	})

@@ -25,6 +25,7 @@ FROM alpine:3.18
 # Install runtime dependencies and create user in single layer
 RUN apk add --no-cache \
     ca-certificates \
+    git \
     openssh-client \
     rsync \
     wget \

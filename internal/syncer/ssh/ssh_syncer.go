@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/sharedvolume/volume-syncer/internal/models"
@@ -19,6 +21,24 @@ const (
 	logSSHConnTestFailed    = "[SSH SYNC] ERROR: SSH connection test failed: %v"
 	logSSHConnTestSuccess   = "[SSH SYNC] SSH connection test successful"
 )
+
+// maskSSHCredentials masks passwords and sensitive information in SSH commands
+func maskSSHCredentials(args []string) []string {
+	maskedArgs := make([]string, len(args))
+	for i, arg := range args {
+		// Mask SSH URLs that might contain passwords: user:password@host
+		credentialRegex := regexp.MustCompile(`([^:@]+):([^@]+)@`)
+		maskedArgs[i] = credentialRegex.ReplaceAllString(arg, "${1}:***@")
+
+		// Also mask any arguments that look like passwords
+		if strings.Contains(strings.ToLower(arg), "password") && len(arg) > 8 {
+			maskedArgs[i] = "***"
+		} else {
+			maskedArgs[i] = arg
+		}
+	}
+	return maskedArgs
+}
 
 // SSHSyncer handles SSH-based synchronization
 type SSHSyncer struct {
@@ -146,7 +166,9 @@ func (s *SSHSyncer) Sync() error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	log.Printf("[SSH SYNC] Executing rsync command: %v", cmd.Args)
+	// Mask credentials in the command logging
+	maskedArgs := maskSSHCredentials(cmd.Args)
+	log.Printf("[SSH SYNC] Executing rsync command: %v", maskedArgs)
 	log.Printf("[SSH SYNC] Starting data transfer...")
 
 	if err := cmd.Run(); err != nil {

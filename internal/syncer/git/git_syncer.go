@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -20,6 +22,29 @@ type GitSyncer struct {
 	details   *models.GitCloneDetails
 	targetDir string
 	timeout   time.Duration
+}
+
+// maskCredentials masks passwords and sensitive information in URLs and commands
+func maskCredentials(text string) string {
+	// Regex to match URLs with credentials: protocol://user:password@host/path
+	credentialURLRegex := regexp.MustCompile(`(https?://)([^:]+):([^@]+)(@[^/\s]+)`)
+	masked := credentialURLRegex.ReplaceAllString(text, "${1}${2}:***${4}")
+
+	// Also mask any standalone passwords that might appear
+	// This is a more generic approach for any password-like strings
+	passwordRegex := regexp.MustCompile(`(\bpassword[=:\s]+)([^\s&]+)`)
+	masked = passwordRegex.ReplaceAllString(masked, "${1}***")
+
+	return masked
+}
+
+// maskGitCommand masks credentials in git command arguments
+func maskGitCommand(args []string) []string {
+	maskedArgs := make([]string, len(args))
+	for i, arg := range args {
+		maskedArgs[i] = maskCredentials(arg)
+	}
+	return maskedArgs
 }
 
 // NewGitSyncer creates a new Git syncer
@@ -58,7 +83,7 @@ func (g *GitSyncer) Sync() error {
 		log.Printf("[GIT SYNC] Using specified branch: %s", branch)
 	}
 
-	// If targetDir exists and is a git repo, do fetch/reset/clean
+	// Check if target directory exists
 	gitDir := g.targetDir + "/.git"
 	log.Printf("[GIT SYNC] Checking if target directory is an existing git repository...")
 	if stat, err := os.Stat(g.targetDir); err == nil && stat.IsDir() {
@@ -66,14 +91,104 @@ func (g *GitSyncer) Sync() error {
 			log.Printf("[GIT SYNC] Found existing git repository, performing sync...")
 			return g.syncExistingRepo(branch)
 		}
+
+		// Directory exists but is not a git repository
 		log.Printf("[GIT SYNC] Target directory exists but is not a git repository")
+
+		// Check if directory is empty
+		entries, err := os.ReadDir(g.targetDir)
+		if err != nil {
+			log.Printf("[GIT SYNC] ERROR: Failed to read target directory: %v", err)
+			return fmt.Errorf("failed to read target directory %s: %w", g.targetDir, err)
+		}
+
+		if len(entries) > 0 {
+			log.Printf("[GIT SYNC] Target directory is not empty (%d entries)", len(entries))
+			log.Printf("[GIT SYNC] SAFETY: Will attempt clone to temporary location first to verify operation before modifying target")
+			return g.safeCloneWithReplace(branch)
+		} else {
+			log.Printf("[GIT SYNC] Target directory is empty, proceeding with clone")
+		}
 	} else {
 		log.Printf("[GIT SYNC] Target directory does not exist or is not a directory")
 	}
 
-	// Otherwise, do a shallow clone
+	// Do a shallow clone
 	log.Printf("[GIT SYNC] Performing fresh clone...")
 	return g.cloneRepo(branch)
+}
+
+// safeCloneWithReplace safely clones to a temporary location first, then replaces target
+func (g *GitSyncer) safeCloneWithReplace(branch string) error {
+	log.Printf("[GIT SYNC] Starting safe clone with replace for non-empty target directory")
+
+	// Create temporary directory in the same filesystem as target
+	targetParent := filepath.Dir(g.targetDir)
+	tmpDir, err := os.MkdirTemp(targetParent, "volume-syncer-git-*")
+	if err != nil {
+		log.Printf("[GIT SYNC] ERROR: Failed to create temporary directory in %s: %v", targetParent, err)
+		return fmt.Errorf("failed to create temporary directory: %w", err)
+	}
+	defer func() {
+		log.Printf("[GIT SYNC] Cleaning up temporary directory: %s", tmpDir)
+		os.RemoveAll(tmpDir)
+	}()
+
+	log.Printf("[GIT SYNC] Created temporary directory for safe clone: %s", tmpDir)
+
+	// Create a temporary syncer to clone to temp location
+	tempSyncer := &GitSyncer{
+		details:   g.details,
+		targetDir: tmpDir,
+		timeout:   g.timeout,
+	}
+
+	// Attempt clone to temporary location
+	log.Printf("[GIT SYNC] Attempting clone to temporary location to verify operation before modifying target...")
+	if err := tempSyncer.cloneRepo(branch); err != nil {
+		log.Printf("[GIT SYNC] ERROR: Clone to temporary location failed: %v", err)
+		log.Printf("[GIT SYNC] SAFETY: Target directory preserved due to clone failure")
+		return fmt.Errorf("clone failed, target directory preserved: %w", err)
+	}
+
+	log.Printf("[GIT SYNC] Clone to temporary location successful, operation verified")
+
+	// Create backup name for current target
+	backupDir := g.targetDir + ".backup-" + fmt.Sprintf("%d", time.Now().Unix())
+
+	// Rename current target to backup (this is atomic and reversible)
+	log.Printf("[GIT SYNC] Backing up current target directory to: %s", backupDir)
+	if err := os.Rename(g.targetDir, backupDir); err != nil {
+		log.Printf("[GIT SYNC] ERROR: Failed to backup current target directory: %v", err)
+		log.Printf("[GIT SYNC] SAFETY: Target directory preserved due to backup failure")
+		return fmt.Errorf("failed to backup target directory, target preserved: %w", err)
+	}
+
+	// Now move temp to target location (atomic operation on same filesystem)
+	log.Printf("[GIT SYNC] Moving temporary clone to target location")
+	if err := os.Rename(tmpDir, g.targetDir); err != nil {
+		log.Printf("[GIT SYNC] ERROR: Failed to move temporary clone to target: %v", err)
+		log.Printf("[GIT SYNC] SAFETY: Restoring original target directory from backup")
+
+		// Restore from backup
+		if restoreErr := os.Rename(backupDir, g.targetDir); restoreErr != nil {
+			log.Printf("[GIT SYNC] CRITICAL ERROR: Failed to restore backup, manual intervention required: %v", restoreErr)
+			return fmt.Errorf("failed to move temp and failed to restore backup - target at %s, backup at %s: %w", g.targetDir, backupDir, err)
+		}
+
+		log.Printf("[GIT SYNC] Target directory successfully restored from backup")
+		return fmt.Errorf("failed to move temporary clone to target, target restored: %w", err)
+	}
+
+	// Success! Remove the backup
+	log.Printf("[GIT SYNC] Operation successful, removing backup directory: %s", backupDir)
+	if err := os.RemoveAll(backupDir); err != nil {
+		log.Printf("[GIT SYNC] WARNING: Failed to remove backup directory %s: %v", backupDir, err)
+		// Don't return error here since the main operation succeeded
+	}
+
+	log.Printf("[GIT SYNC] Safe clone with replace completed successfully")
+	return nil
 }
 
 // syncExistingRepo syncs an existing git repository
@@ -95,25 +210,28 @@ func (g *GitSyncer) syncExistingRepo(branch string) error {
 
 	// Check if the remote URL matches (compare base URL without credentials)
 	log.Printf("[GIT SYNC] Checking remote URL...")
-	remoteURLBytes, err := exec.Command("git", "-C", g.targetDir, "config", "--get", "remote.origin.url").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), g.timeout)
+	defer cancel()
+
+	remoteURLBytes, err := exec.CommandContext(ctx, "git", "-C", g.targetDir, "config", "--get", "remote.origin.url").Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			log.Printf("[GIT SYNC] ERROR: Git config command timed out after %v", g.timeout)
+			return fmt.Errorf("git config command timed out after %v", g.timeout)
+		}
 		log.Printf("[GIT SYNC] ERROR: Failed to get remote URL: %v", err)
 		return fmt.Errorf("failed to get remote URL: %w", err)
 	}
 
 	remoteURL := strings.TrimSpace(string(remoteURLBytes))
-	log.Printf("[GIT SYNC] Current remote URL: %s", remoteURL)
+	log.Printf("[GIT SYNC] Current remote URL: %s", maskCredentials(remoteURL))
 	log.Printf("[GIT SYNC] Expected base URL: %s", g.details.URL)
 
 	// Compare base URLs (without credentials)
 	if !g.urlsMatch(remoteURL, g.details.URL) {
-		log.Printf("[GIT SYNC] Remote URL mismatch, removing directory and performing fresh clone")
-		if err := os.RemoveAll(g.targetDir); err != nil {
-			log.Printf("[GIT SYNC] ERROR: Failed to remove old repo: %v", err)
-			return fmt.Errorf("failed to remove old repo at %s: %w", g.targetDir, err)
-		}
-		log.Printf("[GIT SYNC] Old repository removed successfully")
-		return g.cloneRepo(branch)
+		log.Printf("[GIT SYNC] Remote URL mismatch, need to replace with different repository")
+		log.Printf("[GIT SYNC] SAFETY: Will attempt clone to temporary location first to verify operation")
+		return g.safeCloneWithReplace(branch)
 	}
 
 	// Update remote URL if authentication is needed
@@ -235,7 +353,9 @@ func (g *GitSyncer) cloneRepo(branch string) error {
 			log.Printf("[GIT SYNC] Executing git command with username/password authentication: git clone --depth %d [URL_WITH_CREDENTIALS] %s", depth, g.targetDir)
 		}
 	} else {
-		log.Printf("[GIT SYNC] Executing git command: git %v", gitCmd)
+		// Mask credentials in git command logging
+		maskedGitCmd := maskGitCommand(gitCmd)
+		log.Printf("[GIT SYNC] Executing git command: git %v", maskedGitCmd)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), g.timeout)
@@ -257,11 +377,18 @@ func (g *GitSyncer) cloneRepo(branch string) error {
 
 	// If no branch was specified, log the current branch after clone
 	if branch == "" {
-		// Get the current branch name
-		currentBranchOutput, err := exec.Command("git", "-C", g.targetDir, "branch", "--show-current").Output()
+		// Get the current branch name with timeout
+		branchCtx, branchCancel := context.WithTimeout(context.Background(), g.timeout)
+		defer branchCancel()
+
+		currentBranchOutput, err := exec.CommandContext(branchCtx, "git", "-C", g.targetDir, "branch", "--show-current").Output()
 		if err == nil {
 			currentBranch := strings.TrimSpace(string(currentBranchOutput))
 			log.Printf("[GIT SYNC] Cloned to default branch: %s", currentBranch)
+		} else if branchCtx.Err() == context.DeadlineExceeded {
+			log.Printf("[GIT SYNC] WARNING: Git branch command timed out after %v", g.timeout)
+		} else {
+			log.Printf("[GIT SYNC] WARNING: Failed to get current branch name: %v", err)
 		}
 	}
 
@@ -271,7 +398,9 @@ func (g *GitSyncer) cloneRepo(branch string) error {
 
 // runGitInTarget runs a git command in the target directory
 func (g *GitSyncer) runGitInTarget(args []string) error {
-	log.Printf("[GIT SYNC] Executing in %s: git %v", g.targetDir, args)
+	// Mask credentials in the log output
+	maskedArgs := maskGitCommand(args)
+	log.Printf("[GIT SYNC] Executing in %s: git %v", g.targetDir, maskedArgs)
 
 	ctx, cancel := context.WithTimeout(context.Background(), g.timeout)
 	defer cancel()
@@ -446,9 +575,17 @@ func (g *GitSyncer) urlsMatch(url1, url2 string) bool {
 func (g *GitSyncer) getDefaultBranch() (string, error) {
 	log.Printf("[GIT SYNC] Getting default branch from remote repository")
 
-	// Try to get the default branch from remote HEAD
-	output, err := exec.Command("git", "-C", g.targetDir, "symbolic-ref", "refs/remotes/origin/HEAD").Output()
+	// Try to get the default branch from remote HEAD with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), g.timeout)
+	defer cancel()
+
+	output, err := exec.CommandContext(ctx, "git", "-C", g.targetDir, "symbolic-ref", "refs/remotes/origin/HEAD").Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			log.Printf("[GIT SYNC] ERROR: Git symbolic-ref command timed out after %v", g.timeout)
+			return "", fmt.Errorf("git symbolic-ref command timed out after %v", g.timeout)
+		}
+
 		// If that fails, try to set the remote HEAD first
 		log.Printf("[GIT SYNC] Failed to get remote HEAD, trying to set it")
 		if err := g.runGitInTarget([]string{"remote", "set-head", "origin", "--auto"}); err != nil {
@@ -463,9 +600,16 @@ func (g *GitSyncer) getDefaultBranch() (string, error) {
 			return "", fmt.Errorf("unable to determine default branch")
 		}
 
-		// Try again after setting remote HEAD
-		output, err = exec.Command("git", "-C", g.targetDir, "symbolic-ref", "refs/remotes/origin/HEAD").Output()
+		// Try again after setting remote HEAD with timeout
+		retryCtx, retryCancel := context.WithTimeout(context.Background(), g.timeout)
+		defer retryCancel()
+
+		output, err = exec.CommandContext(retryCtx, "git", "-C", g.targetDir, "symbolic-ref", "refs/remotes/origin/HEAD").Output()
 		if err != nil {
+			if retryCtx.Err() == context.DeadlineExceeded {
+				log.Printf("[GIT SYNC] ERROR: Git symbolic-ref retry command timed out after %v", g.timeout)
+				return "", fmt.Errorf("git symbolic-ref retry command timed out after %v", g.timeout)
+			}
 			return "", fmt.Errorf("failed to get default branch: %w", err)
 		}
 	}
