@@ -2,8 +2,10 @@ package s3
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,13 +40,56 @@ func NewS3Syncer(details *models.S3Details, targetPath string, timeout time.Dura
 	log.Printf("[S3 SYNC] Target Path: %s", targetPath)
 	log.Printf("[S3 SYNC] Timeout: %v", timeout)
 
+	// Determine if this is AWS S3 or S3-compatible service
+	isAWSS3 := strings.Contains(details.EndpointURL, "amazonaws.com")
+
+	// Auto-detect path style preference
+	forcePathStyle := true // Default to path style for compatibility
+	if details.ForcePathStyle != nil {
+		forcePathStyle = *details.ForcePathStyle
+		log.Printf("[S3 SYNC] Using explicit forcePathStyle setting: %v", forcePathStyle)
+	} else if isAWSS3 {
+		forcePathStyle = false // AWS S3 prefers virtual-hosted style
+		log.Printf("[S3 SYNC] Detected AWS S3, using virtual-hosted style")
+	} else {
+		log.Printf("[S3 SYNC] Detected S3-compatible service, using path style")
+	}
+
+	// Auto-detect SSL preference
+	disableSSL := false
+	if details.DisableSSL != nil {
+		disableSSL = *details.DisableSSL
+		log.Printf("[S3 SYNC] Using explicit SSL setting - disabled: %v", disableSSL)
+	} else if strings.HasPrefix(details.EndpointURL, "http://") {
+		disableSSL = true
+		log.Printf("[S3 SYNC] Detected HTTP endpoint, disabling SSL")
+	} else {
+		log.Printf("[S3 SYNC] Using SSL (HTTPS)")
+	}
+
 	// Create AWS session
 	log.Printf("[S3 SYNC] Creating AWS session...")
-	sess, err := session.NewSession(&aws.Config{
-		Region:      aws.String(details.Region),
-		Endpoint:    aws.String(details.EndpointURL),
-		Credentials: credentials.NewStaticCredentials(details.AccessKey, details.SecretKey, ""),
-	})
+	config := &aws.Config{
+		Region:           aws.String(details.Region),
+		Endpoint:         aws.String(details.EndpointURL),
+		Credentials:      credentials.NewStaticCredentials(details.AccessKey, details.SecretKey, ""),
+		S3ForcePathStyle: aws.Bool(forcePathStyle),
+		DisableSSL:       aws.Bool(disableSSL),
+	}
+
+	// Additional settings for better compatibility
+	if !isAWSS3 {
+		// For S3-compatible services, disable SSL certificate verification for self-signed certs
+		// This is common in development/private cloud environments
+		config.HTTPClient = &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			},
+		}
+		log.Printf("[S3 SYNC] Configured for S3-compatible service with relaxed SSL verification")
+	}
+
+	sess, err := session.NewSession(config)
 	if err != nil {
 		log.Printf("[S3 SYNC] ERROR: Failed to create AWS session: %v", err)
 		return nil, fmt.Errorf("failed to create AWS session: %w", err)
@@ -53,16 +98,68 @@ func NewS3Syncer(details *models.S3Details, targetPath string, timeout time.Dura
 
 	s3Client := s3.New(sess)
 	downloader := s3manager.NewDownloader(sess)
-	log.Printf("[S3 SYNC] S3 client and downloader initialized")
 
-	return &S3Syncer{
+	// Test the connection to ensure compatibility
+	syncer := &S3Syncer{
 		details:    details,
 		targetPath: targetPath,
 		timeout:    timeout,
 		session:    sess,
 		s3Client:   s3Client,
 		downloader: downloader,
-	}, nil
+	}
+
+	log.Printf("[S3 SYNC] Testing S3 connection...")
+	if err := syncer.testConnection(); err != nil {
+		log.Printf("[S3 SYNC] WARNING: Initial connection test failed: %v", err)
+
+		// If it's not AWS S3 and we failed, try the opposite path style
+		if !isAWSS3 {
+			log.Printf("[S3 SYNC] Retrying with virtual-hosted style...")
+			config.S3ForcePathStyle = aws.Bool(false)
+
+			sess, err = session.NewSession(config)
+			if err != nil {
+				log.Printf("[S3 SYNC] ERROR: Failed to create fallback AWS session: %v", err)
+				return nil, fmt.Errorf("failed to create fallback AWS session: %w", err)
+			}
+
+			s3Client = s3.New(sess)
+			downloader = s3manager.NewDownloader(sess)
+			syncer.session = sess
+			syncer.s3Client = s3Client
+			syncer.downloader = downloader
+
+			if err := syncer.testConnection(); err != nil {
+				log.Printf("[S3 SYNC] ERROR: Both path styles failed: %v", err)
+				return nil, fmt.Errorf("failed to establish S3 connection with both path styles: %w", err)
+			}
+			log.Printf("[S3 SYNC] Successfully connected with virtual-hosted style")
+		} else {
+			return nil, fmt.Errorf("failed to connect to AWS S3: %w", err)
+		}
+	} else {
+		log.Printf("[S3 SYNC] S3 connection test successful")
+	}
+
+	log.Printf("[S3 SYNC] S3 client and downloader initialized")
+
+	return syncer, nil
+}
+
+// testConnection tests the S3 connection by attempting to list bucket contents
+func (s *S3Syncer) testConnection() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Try to list just one object to test connectivity
+	input := &s3.ListObjectsV2Input{
+		Bucket:  aws.String(s.details.BucketName),
+		MaxKeys: aws.Int64(1),
+	}
+
+	_, err := s.s3Client.ListObjectsV2WithContext(ctx, input)
+	return err
 }
 
 // Sync synchronizes data from S3 bucket to local target path

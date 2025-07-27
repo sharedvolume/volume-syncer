@@ -141,6 +141,11 @@ func parseSSHDetails(details interface{}) (*models.SSHDetails, error) {
 		sshDetails.PrivateKey = privateKey
 	}
 
+	// Parse the path field - this is required for SSH sync
+	if path, ok := detailsMap["path"].(string); ok {
+		sshDetails.Path = path
+	}
+
 	// Validate that password and privateKey are not both provided
 	if sshDetails.Password != "" && (sshDetails.PrivateKey != "" || sshDetails.KeyPath != "") {
 		return nil, errors.New("password and privateKey/key_path cannot be provided at the same time")

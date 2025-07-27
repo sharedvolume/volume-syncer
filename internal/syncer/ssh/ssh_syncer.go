@@ -30,17 +30,17 @@ func maskSSHCredentials(args []string) []string {
 		credentialRegex := regexp.MustCompile(`([^:@]+):([^@]+)@`)
 		maskedArgs[i] = credentialRegex.ReplaceAllString(arg, "${1}:***@")
 
+		// Mask sshpass password arguments: sshpass -p 'password'
+		sshpassRegex := regexp.MustCompile(`sshpass -p '([^']+)'`)
+		maskedArgs[i] = sshpassRegex.ReplaceAllString(maskedArgs[i], "sshpass -p '***'")
+
 		// Also mask any arguments that look like passwords
 		if strings.Contains(strings.ToLower(arg), "password") && len(arg) > 8 {
 			maskedArgs[i] = "***"
-		} else {
-			maskedArgs[i] = arg
 		}
 	}
 	return maskedArgs
-}
-
-// SSHSyncer handles SSH-based synchronization
+} // SSHSyncer handles SSH-based synchronization
 type SSHSyncer struct {
 	sshDetails *models.SSHDetails
 	targetPath string
@@ -59,6 +59,7 @@ func NewSSHSyncer(sshDetails *models.SSHDetails, targetPath string, timeout time
 // Sync performs the synchronization using rsync over SSH
 func (s *SSHSyncer) Sync() error {
 	log.Printf("[SSH SYNC] Starting SSH sync from %s@%s:%d to %s", s.sshDetails.User, s.sshDetails.Host, s.sshDetails.Port, s.targetPath)
+	log.Printf("[SSH SYNC] SSH Details - Host: %s, Port: %d, User: %s, Path: '%s'", s.sshDetails.Host, s.sshDetails.Port, s.sshDetails.User, s.sshDetails.Path)
 	log.Printf("[SSH SYNC] Timeout configured: %v", s.timeout)
 
 	// Ensure target directory exists
@@ -81,6 +82,14 @@ func (s *SSHSyncer) Sync() error {
 			log.Printf("[SSH SYNC] ERROR: Failed to read private key file: %v", err)
 			return fmt.Errorf("failed to read private key file: %w", err)
 		}
+
+		// Ensure the key ends with a newline (required for SSH key files)
+		keyStr := strings.TrimSpace(string(privateKeyBytes))
+		if !strings.HasSuffix(keyStr, "\n") {
+			keyStr += "\n"
+		}
+		privateKeyBytes = []byte(keyStr)
+
 		log.Printf("[SSH SYNC] Private key loaded successfully (%d bytes)", len(privateKeyBytes))
 
 		log.Printf("[SSH SYNC] Creating temporary key file for rsync")
@@ -111,7 +120,27 @@ func (s *SSHSyncer) Sync() error {
 			log.Printf("[SSH SYNC] ERROR: Failed to decode base64 private key: %v", err)
 			return fmt.Errorf("failed to decode base64 private key: %w", err)
 		}
-		log.Printf("[SSH SYNC] Base64 private key decoded successfully (%d bytes)", len(privateKeyBytes))
+
+		// Trim whitespace and empty lines from the decoded key
+		keyStr := strings.TrimSpace(string(privateKeyBytes))
+
+		// Ensure the key ends with a newline (required for SSH key files)
+		if !strings.HasSuffix(keyStr, "\n") {
+			keyStr += "\n"
+		}
+
+		privateKeyBytes = []byte(keyStr)
+		log.Printf("[SSH SYNC] Base64 private key decoded and trimmed successfully (%d bytes)", len(privateKeyBytes))
+
+		// Debug: Check if the decoded key looks correct
+		log.Printf("[SSH SYNC] Key starts with: %s", keyStr[:min(50, len(keyStr))])
+		log.Printf("[SSH SYNC] Key ends with: %s", keyStr[max(0, len(keyStr)-50):])
+		if !strings.Contains(keyStr, "BEGIN OPENSSH PRIVATE KEY") {
+			log.Printf("[SSH SYNC] WARNING: Decoded key doesn't contain expected OpenSSH header")
+		}
+		if !strings.Contains(keyStr, "END OPENSSH PRIVATE KEY") {
+			log.Printf("[SSH SYNC] WARNING: Decoded key doesn't contain expected OpenSSH footer")
+		}
 
 		log.Printf("[SSH SYNC] Creating temporary key file for rsync")
 		tmpKeyFile, err = s.createTempKeyFile(privateKeyBytes)
@@ -134,6 +163,14 @@ func (s *SSHSyncer) Sync() error {
 		log.Printf(logSSHConnTestSuccess)
 	} else if s.sshDetails.Password != "" {
 		log.Printf("[SSH SYNC] Using password authentication")
+
+		// Check if sshpass is available
+		if _, err := exec.LookPath("sshpass"); err != nil {
+			log.Printf("[SSH SYNC] ERROR: Password authentication requires 'sshpass' utility, but it's not installed")
+			log.Printf("[SSH SYNC] Please install sshpass or use SSH key authentication instead")
+			return fmt.Errorf("password authentication requires 'sshpass' utility, but it's not available. Please install sshpass or use SSH key authentication")
+		}
+
 		// Test SSH connection with password
 		log.Printf("[SSH SYNC] Testing SSH connection with password...")
 		if err := s.testSSHConnection(nil, s.sshDetails.Password); err != nil {
@@ -154,6 +191,27 @@ func (s *SSHSyncer) Sync() error {
 
 	// Build rsync command
 	log.Printf("[SSH SYNC] Building rsync command...")
+
+	// Check if ssh is available and log its location
+	sshPath, err := exec.LookPath("ssh")
+	if err != nil {
+		log.Printf("[SSH SYNC] WARNING: ssh command not found in PATH: %v", err)
+		log.Printf("[SSH SYNC] Checking common locations...")
+		for _, path := range []string{"/usr/bin/ssh", "/bin/ssh", "/usr/local/bin/ssh"} {
+			if _, err := os.Stat(path); err == nil {
+				log.Printf("[SSH SYNC] Found ssh at: %s", path)
+				sshPath = path
+				break
+			}
+		}
+		if sshPath == "" {
+			log.Printf("[SSH SYNC] ERROR: ssh command not found in any common location")
+			return fmt.Errorf("ssh command not found")
+		}
+	} else {
+		log.Printf("[SSH SYNC] Found ssh command at: %s", sshPath)
+	}
+
 	rsyncCmd := s.buildRsyncCommand(tmpKeyFile)
 	log.Printf("[SSH SYNC] Rsync command built with %d arguments", len(rsyncCmd))
 
@@ -255,12 +313,58 @@ func (s *SSHSyncer) createTempKeyFile(privateKeyBytes []byte) (string, error) {
 
 // buildRsyncCommand builds the rsync command arguments
 func (s *SSHSyncer) buildRsyncCommand(keyFile string) []string {
+	// Detect SSH path
+	sshPath := "ssh" // default fallback
+	if detectedPath, err := exec.LookPath("ssh"); err == nil {
+		sshPath = detectedPath
+	} else {
+		// Check common locations
+		for _, path := range []string{"/usr/bin/ssh", "/bin/ssh", "/usr/local/bin/ssh"} {
+			if _, err := os.Stat(path); err == nil {
+				sshPath = path
+				break
+			}
+		}
+	}
+
+	log.Printf("[SSH SYNC] Using SSH path: %s", sshPath)
+
 	// Build SSH command for rsync
-	sshCmd := fmt.Sprintf("ssh -i %s -p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
-		keyFile, s.sshDetails.Port)
+	var sshCmd string
+	if keyFile != "" {
+		// Use private key authentication with detected ssh path
+		sshCmd = fmt.Sprintf("%s -i %s -p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
+			sshPath, keyFile, s.sshDetails.Port)
+	} else if s.sshDetails.Password != "" {
+		// Use password authentication with sshpass (if available)
+		// Escape single quotes in password to prevent shell injection
+		escapedPassword := strings.ReplaceAll(s.sshDetails.Password, "'", "'\"'\"'")
+
+		// Detect sshpass path
+		sshpassPath := "sshpass"
+		if detectedPath, err := exec.LookPath("sshpass"); err == nil {
+			sshpassPath = detectedPath
+		}
+
+		sshCmd = fmt.Sprintf("%s -p '%s' %s -p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
+			sshpassPath, escapedPassword, sshPath, s.sshDetails.Port)
+	} else {
+		// Use ssh-agent or default SSH authentication
+		sshCmd = fmt.Sprintf("%s -p %d -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null",
+			sshPath, s.sshDetails.Port)
+	}
 
 	// Build the full source string using the specified path
-	fullSource := fmt.Sprintf("%s@%s:%s", s.sshDetails.User, s.sshDetails.Host, s.sshDetails.Path)
+	log.Printf("[SSH SYNC] Building source path - User: %s, Host: %s, Path: '%s'", s.sshDetails.User, s.sshDetails.Host, s.sshDetails.Path)
+
+	// Add trailing slash to source path to copy contents of directory, not the directory itself
+	sourcePath := s.sshDetails.Path
+	if !strings.HasSuffix(sourcePath, "/") {
+		sourcePath += "/"
+	}
+
+	fullSource := fmt.Sprintf("%s@%s:%s", s.sshDetails.User, s.sshDetails.Host, sourcePath)
+	log.Printf("[SSH SYNC] Full source string: %s", fullSource)
 
 	// Build rsync arguments
 	args := []string{
@@ -272,5 +376,23 @@ func (s *SSHSyncer) buildRsyncCommand(keyFile string) []string {
 		s.targetPath + "/", // target (ensure trailing slash)
 	}
 
+	// Log the command for debugging
+	log.Printf("[SSH SYNC] SSH command for rsync: %s", sshCmd)
+
 	return args
+}
+
+// Helper functions for min/max
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

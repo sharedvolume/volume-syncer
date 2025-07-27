@@ -28,6 +28,7 @@ RUN apk add --no-cache \
     git \
     openssh-client \
     rsync \
+    sshpass \
     wget \
     && rm -rf /var/cache/apk/* \
     && addgroup -g 1001 -S appgroup \

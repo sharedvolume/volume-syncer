@@ -53,6 +53,10 @@ type S3Details struct {
 	AccessKey   string `json:"accessKey" binding:"required"`
 	SecretKey   string `json:"secretKey" binding:"required"`
 	Region      string `json:"region" binding:"required"`
+	// Optional: Force path style (useful for MinIO and some S3-compatible services)
+	ForcePathStyle *bool `json:"forcePathStyle,omitempty"`
+	// Optional: Disable SSL (useful for local development)
+	DisableSSL *bool `json:"disableSSL,omitempty"`
 }
 
 // SyncResponse represents the response for sync operations
