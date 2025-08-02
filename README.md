@@ -34,15 +34,15 @@ Request payload:
   "source": {
     "type": "ssh",
     "details": {
-      "host": "sshServer",
+      "host": "example-server.com",
       "port": 22,
-      "username": "pdm",
+      "username": "deploy",
       "path": "/opt/data",
       "privateKey": "<base64 encoded private key>"
     }
   },
   "target": {
-    "path": "/Users/bilgehan.nal/Desktop/test/cp/repo"
+    "path": "/mnt/shared-volume"
   },
   "timeout": "30s"
 }
@@ -59,7 +59,7 @@ Response codes:
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
+git clone https://github.com/sharedvolume/volume-syncer.git
 cd volume-syncer
 ```
 
@@ -370,6 +370,88 @@ Check container logs for detailed error information:
 ```bash
 docker-compose logs -f volume-syncer
 ```
+
+## Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines on how to contribute to this project.
+
+### Quick Start for Contributors
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/amazing-feature`
+3. Make your changes and add tests
+4. Run tests: `go test ./...`
+5. Run linting: `golangci-lint run`
+6. Commit your changes: `git commit -m 'Add amazing feature'`
+7. Push to the branch: `git push origin feature/amazing-feature`
+8. Open a Pull Request
+
+### Development Setup
+
+```bash
+# Clone your fork
+git clone https://github.com/yourusername/volume-syncer.git
+cd volume-syncer
+
+# Install dependencies
+go mod download
+
+# Run tests
+go test ./...
+
+# Build and run
+go build -o volume-syncer ./cmd/server
+./volume-syncer
+```
+
+For more detailed contribution guidelines, code standards, and development practices, please read our [Contributing Guide](CONTRIBUTING.md).
+
+### Pull Request Guidelines
+
+When submitting a pull request, please include:
+
+**Description & Type of Change**
+- Clear description of what the PR does
+- Specify if it's a bug fix, new feature, breaking change, documentation update, etc.
+
+**Changes Made**
+- List specific changes made
+- Reference affected files or modules
+- Include any new dependencies or configuration changes
+
+**Testing**
+- Add tests for new functionality
+- Ensure all existing tests pass
+- Include manual testing steps if applicable
+
+**Example Manual Testing:**
+```bash
+# Test new sync source
+curl -X POST http://localhost:8080/api/1.0/sync \
+  -H "Content-Type: application/json" \
+  -d '{
+    "source": {
+      "type": "your-new-source",
+      "details": {
+        "host": "test.example.com",
+        "username": "testuser"
+      }
+    },
+    "target": {
+      "path": "/mnt/test-volume"
+    }
+  }'
+```
+
+**Checklist**
+- [ ] Code follows project style guidelines
+- [ ] Self-review completed
+- [ ] Documentation updated
+- [ ] No new warnings generated
+- [ ] CHANGELOG.md updated
+
+**Related Issues**
+- Reference any related issues (e.g., "Fixes #123", "Closes #456")
 
 ## License
 

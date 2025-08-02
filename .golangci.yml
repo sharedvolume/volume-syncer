@@ -1,0 +1,18 @@
+# golangci-lint configuration for Volume Syncer
+# Basic configuration with essential linters
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - gofmt
+    - goimports
+    - gosec
+    - gosimple
+    - govet
+    - ineffassign
+    - staticcheck
+    - typecheck
+    - unused
