@@ -71,12 +71,12 @@ jobs:
           org.opencontainers.image.licenses=MIT
           
     - name: Create GitHub Release
-      uses: actions/create-release@v1
+      uses: softprops/action-gh-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.REPO_TOKEN }}
       with:
         tag_name: ${{ github.ref }}
-        release_name: Release ${{ steps.version.outputs.version }}
+        name: Release ${{ steps.version.outputs.version }}
         body: |
           ## Changes in this Release
           
