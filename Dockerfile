@@ -48,7 +48,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o volume-syncer ./cmd/server
 
 # Runtime stage
-FROM alpine:3.18
+FROM alpine:3.22
 
 # Build arguments for metadata
 ARG BUILD_DATE
