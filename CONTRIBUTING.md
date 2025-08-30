@@ -211,7 +211,7 @@ Please do not report security issues in public GitHub issues. Instead, send an e
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
+By contributing, you agree that your contributions will be licensed under the Apache License 2.0.
 
 ## Code of Conduct
 
