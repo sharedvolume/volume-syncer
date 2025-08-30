@@ -2,6 +2,9 @@
 
 A professional-grade, high-performance API server for synchronizing data from various sources (SSH, Git, S3) to local volumes. Built specifically for Kubernetes SharedVolume operators with Go and Gin framework, designed for containerized environments and enterprise workloads.
 
+**Repository**: [https://github.com/sharedvolume/volume-syncer](https://github.com/sharedvolume/volume-syncer)  
+**Releases**: [https://github.com/sharedvolume/volume-syncer/releases](https://github.com/sharedvolume/volume-syncer/releases)
+
 ## 🚀 Features
 
 - **📡 REST API**: Simple HTTP API for triggering sync operations with comprehensive error handling
