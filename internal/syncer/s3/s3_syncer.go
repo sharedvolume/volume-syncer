@@ -40,6 +40,25 @@ func NewS3Syncer(details *models.S3Details, targetPath string, timeout time.Dura
 	log.Printf("[S3 SYNC] Target Path: %s", targetPath)
 	log.Printf("[S3 SYNC] Timeout: %v", timeout)
 
+    // Normalize the S3 prefix path
+    // 
+    // Rules:
+    // - If user provides "/" , we sync the whole bucket (empty prefix)
+    // - Otherwise, trim leading/trailing slashes and ensure a single trailing slash for directory prefixes
+    rawPath := strings.TrimSpace(details.Path)
+    switch rawPath {
+    case "/":
+        details.Path = ""
+        log.Printf("[S3 SYNC] Normalized prefix: <entire bucket> (input was '/')")
+    default:
+        normalized := strings.Trim(rawPath, "/")
+        if normalized != "" && !strings.HasSuffix(normalized, "/") {
+            normalized = normalized + "/"
+        }
+        details.Path = normalized
+        log.Printf("[S3 SYNC] Normalized prefix: %s", details.Path)
+    }
+
 	// Determine if this is AWS S3 or S3-compatible service
 	isAWSS3 := strings.Contains(details.EndpointURL, "amazonaws.com")
 
@@ -164,7 +183,12 @@ func (s *S3Syncer) testConnection() error {
 
 // Sync synchronizes data from S3 bucket to local target path
 func (s *S3Syncer) Sync() error {
-	log.Printf("[S3 SYNC] Starting S3 sync from s3://%s/%s to %s", s.details.BucketName, s.details.Path, s.targetPath)
+    // Build a human-friendly source display without double slashes
+    sourceDisplay := "s3://" + s.details.BucketName
+    if s.details.Path != "" {
+        sourceDisplay = sourceDisplay + "/" + s.details.Path
+    }
+    log.Printf("[S3 SYNC] Starting S3 sync from %s to %s", sourceDisplay, s.targetPath)
 	log.Printf("[S3 SYNC] Sync timeout: %v", s.timeout)
 
 	// Create context with timeout for all S3 operations
@@ -180,7 +204,11 @@ func (s *S3Syncer) Sync() error {
 	log.Printf("[S3 SYNC] Target directory created successfully")
 
 	// List objects in the bucket with the given prefix
-	log.Printf("[S3 SYNC] Listing objects in bucket with prefix: %s", s.details.Path)
+    if s.details.Path == "" {
+        log.Printf("[S3 SYNC] Listing all objects in bucket (no prefix)")
+    } else {
+        log.Printf("[S3 SYNC] Listing objects in bucket with prefix: %s", s.details.Path)
+    }
 	objects, err := s.listObjects(ctx)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -191,8 +219,12 @@ func (s *S3Syncer) Sync() error {
 		return fmt.Errorf("failed to list S3 objects: %w", err)
 	}
 
-	if len(objects) == 0 {
-		log.Printf("[S3 SYNC] No objects found in s3://%s/%s", s.details.BucketName, s.details.Path)
+    if len(objects) == 0 {
+        if s.details.Path == "" {
+            log.Printf("[S3 SYNC] No objects found in s3://%s", s.details.BucketName)
+        } else {
+            log.Printf("[S3 SYNC] No objects found in s3://%s/%s", s.details.BucketName, s.details.Path)
+        }
 		return nil
 	}
 
