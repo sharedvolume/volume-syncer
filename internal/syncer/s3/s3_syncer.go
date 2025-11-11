@@ -40,6 +40,25 @@ func NewS3Syncer(details *models.S3Details, targetPath string, timeout time.Dura
 	log.Printf("[S3 SYNC] Target Path: %s", targetPath)
 	log.Printf("[S3 SYNC] Timeout: %v", timeout)
 
+    // Normalize the S3 prefix path
+    // 
+    // Rules:
+    // - If user provides "/" , we sync the whole bucket (empty prefix)
+    // - Otherwise, trim leading/trailing slashes and ensure a single trailing slash for directory prefixes
+    rawPath := strings.TrimSpace(details.Path)
+    switch rawPath {
+    case "/":
+        details.Path = ""
+        log.Printf("[S3 SYNC] Normalized prefix: <entire bucket> (input was '/')")
+    default:
+        normalized := strings.Trim(rawPath, "/")
+        if normalized != "" && !strings.HasSuffix(normalized, "/") {
+            normalized = normalized + "/"
+        }
+        details.Path = normalized
+        log.Printf("[S3 SYNC] Normalized prefix: %s", details.Path)
+    }
+
 	// Determine if this is AWS S3 or S3-compatible service
 	isAWSS3 := strings.Contains(details.EndpointURL, "amazonaws.com")
 
@@ -164,7 +183,12 @@ func (s *S3Syncer) testConnection() error {
 
 // Sync synchronizes data from S3 bucket to local target path
 func (s *S3Syncer) Sync() error {
-	log.Printf("[S3 SYNC] Starting S3 sync from s3://%s/%s to %s", s.details.BucketName, s.details.Path, s.targetPath)
+    // Build a human-friendly source display without double slashes
+    sourceDisplay := "s3://" + s.details.BucketName
+    if s.details.Path != "" {
+        sourceDisplay = sourceDisplay + "/" + s.details.Path
+    }
+    log.Printf("[S3 SYNC] Starting S3 sync from %s to %s", sourceDisplay, s.targetPath)
 	log.Printf("[S3 SYNC] Sync timeout: %v", s.timeout)
 
 	// Create context with timeout for all S3 operations
@@ -180,7 +204,11 @@ func (s *S3Syncer) Sync() error {
 	log.Printf("[S3 SYNC] Target directory created successfully")
 
 	// List objects in the bucket with the given prefix
-	log.Printf("[S3 SYNC] Listing objects in bucket with prefix: %s", s.details.Path)
+    if s.details.Path == "" {
+        log.Printf("[S3 SYNC] Listing all objects in bucket (no prefix)")
+    } else {
+        log.Printf("[S3 SYNC] Listing objects in bucket with prefix: %s", s.details.Path)
+    }
 	objects, err := s.listObjects(ctx)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -191,8 +219,17 @@ func (s *S3Syncer) Sync() error {
 		return fmt.Errorf("failed to list S3 objects: %w", err)
 	}
 
-	if len(objects) == 0 {
-		log.Printf("[S3 SYNC] No objects found in s3://%s/%s", s.details.BucketName, s.details.Path)
+    if len(objects) == 0 {
+        if s.details.Path == "" {
+            log.Printf("[S3 SYNC] No objects found in s3://%s", s.details.BucketName)
+        } else {
+            log.Printf("[S3 SYNC] No objects found in s3://%s/%s", s.details.BucketName, s.details.Path)
+        }
+		// Still perform cleanup to remove any orphaned local files
+		log.Printf("[S3 SYNC] Starting cleanup of orphaned local files (no objects in S3)...")
+		if err := s.cleanupOrphanedFiles(objects); err != nil {
+			log.Printf("[S3 SYNC] WARNING: Cleanup of orphaned files encountered errors: %v", err)
+		}
 		return nil
 	}
 
@@ -212,6 +249,14 @@ func (s *S3Syncer) Sync() error {
 	}
 
 	log.Printf("[S3 SYNC] Successfully synced %d objects", len(objects))
+
+	// Clean up local files that no longer exist in S3
+	log.Printf("[S3 SYNC] Starting cleanup of orphaned local files...")
+	if err := s.cleanupOrphanedFiles(objects); err != nil {
+		log.Printf("[S3 SYNC] WARNING: Cleanup of orphaned files encountered errors: %v", err)
+		// Don't fail the entire sync if cleanup has issues, but log the warning
+	}
+
 	return nil
 }
 
@@ -257,10 +302,7 @@ func (s *S3Syncer) downloadObject(ctx context.Context, obj *s3.Object) error {
 	log.Printf("[S3 SYNC] Starting download of object: %s", *obj.Key)
 
 	// Calculate relative path by removing the prefix
-	relativePath := strings.TrimPrefix(*obj.Key, s.details.Path)
-	if relativePath == "" {
-		relativePath = filepath.Base(*obj.Key)
-	}
+	relativePath := s.calculateRelativePath(*obj.Key)
 	log.Printf("[S3 SYNC] Relative path: %s", relativePath)
 
 	// Create the full local path
@@ -300,5 +342,119 @@ func (s *S3Syncer) downloadObject(ctx context.Context, obj *s3.Object) error {
 	}
 
 	log.Printf("[S3 SYNC] Successfully downloaded %s (%d bytes written, %d bytes expected)", *obj.Key, bytesWritten, *obj.Size)
+	return nil
+}
+
+// calculateRelativePath calculates the relative path for a local file from an S3 key
+// This matches the logic used in downloadObject
+func (s *S3Syncer) calculateRelativePath(s3Key string) string {
+	relativePath := strings.TrimPrefix(s3Key, s.details.Path)
+	if relativePath == "" {
+		relativePath = filepath.Base(s3Key)
+	}
+	return relativePath
+}
+
+// cleanupOrphanedFiles removes local files that no longer exist in S3
+func (s *S3Syncer) cleanupOrphanedFiles(s3Objects []*s3.Object) error {
+	// Build a map of expected local file paths (relative to targetPath)
+	expectedFiles := make(map[string]bool)
+	for _, obj := range s3Objects {
+		relativePath := s.calculateRelativePath(*obj.Key)
+		// Normalize path separators for cross-platform compatibility
+		normalizedPath := filepath.ToSlash(relativePath)
+		expectedFiles[normalizedPath] = true
+	}
+
+	log.Printf("[S3 SYNC] Built map of %d expected files from S3", len(expectedFiles))
+
+	// Track files and directories to delete
+	var filesToDelete []string
+	var dirsToCheck []string
+
+	// Walk the target directory to find orphaned files
+	err := filepath.Walk(s.targetPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			log.Printf("[S3 SYNC] WARNING: Error accessing path %s during cleanup: %v", path, err)
+			return nil // Continue walking despite errors
+		}
+
+		// Skip the target directory itself
+		if path == s.targetPath {
+			return nil
+		}
+
+		// Calculate relative path from targetPath
+		relPath, err := filepath.Rel(s.targetPath, path)
+		if err != nil {
+			log.Printf("[S3 SYNC] WARNING: Failed to calculate relative path for %s: %v", path, err)
+			return nil
+		}
+
+		// Normalize path separators for comparison
+		normalizedRelPath := filepath.ToSlash(relPath)
+
+		if info.IsDir() {
+			// Track directories for later cleanup (after files are deleted)
+			dirsToCheck = append(dirsToCheck, path)
+			return nil
+		}
+
+		// Check if this file exists in S3
+		if !expectedFiles[normalizedRelPath] {
+			filesToDelete = append(filesToDelete, path)
+			log.Printf("[S3 SYNC] Marked orphaned file for deletion: %s", path)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		log.Printf("[S3 SYNC] ERROR: Failed to walk target directory during cleanup: %v", err)
+		return fmt.Errorf("failed to walk target directory: %w", err)
+	}
+
+	// Delete orphaned files
+	deletedCount := 0
+	for _, filePath := range filesToDelete {
+		log.Printf("[S3 SYNC] Deleting orphaned file: %s", filePath)
+		if err := os.Remove(filePath); err != nil {
+			log.Printf("[S3 SYNC] WARNING: Failed to delete orphaned file %s: %v", filePath, err)
+			// Continue deleting other files even if one fails
+		} else {
+			deletedCount++
+		}
+	}
+
+	if deletedCount > 0 {
+		log.Printf("[S3 SYNC] Deleted %d orphaned file(s)", deletedCount)
+	} else {
+		log.Printf("[S3 SYNC] No orphaned files found to delete")
+	}
+
+	// Clean up empty directories (in reverse order, deepest first)
+	// This ensures we can remove nested empty directories
+	for i := len(dirsToCheck) - 1; i >= 0; i-- {
+		dirPath := dirsToCheck[i]
+		// Skip the target directory itself
+		if dirPath == s.targetPath {
+			continue
+		}
+
+		// Check if directory is empty
+		entries, err := os.ReadDir(dirPath)
+		if err != nil {
+			log.Printf("[S3 SYNC] WARNING: Failed to read directory %s during cleanup: %v", dirPath, err)
+			continue
+		}
+
+		if len(entries) == 0 {
+			log.Printf("[S3 SYNC] Deleting empty directory: %s", dirPath)
+			if err := os.Remove(dirPath); err != nil {
+				log.Printf("[S3 SYNC] WARNING: Failed to delete empty directory %s: %v", dirPath, err)
+			}
+		}
+	}
+
 	return nil
 }
